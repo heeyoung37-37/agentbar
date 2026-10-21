@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+dist/
+*.app/
+*.zip
+*.dmg
+.env
+*.log
+config.json
+*.plist
+!presets/*.plist
