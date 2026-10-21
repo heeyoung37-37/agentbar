@@ -2,9 +2,9 @@
 (() => {
   'use strict';
   const examples = Object.freeze({
-    start: { codex: 100, claude: 100, label: '작업 시작' },
-    flow: { codex: 62, claude: 97, label: '작업 중' },
-    finish: { codex: 9, claude: 32, label: '마무리' },
+    start: { codex: 100, claude: 100, label: 'Example 1' },
+    flow: { codex: 62, claude: 97, label: 'Example 2' },
+    finish: { codex: 9, claude: 32, label: 'Example 3' },
   });
   const buttons = [...document.querySelectorAll('[data-scenario]')];
   const demo = document.getElementById('quota-demo');
@@ -22,9 +22,9 @@
       value.append(percent);
       document.getElementById(`${provider}-bar`).style.width = `${example[provider]}%`;
     }
-    const summary = `Codex ${example.codex}%, Claude ${example.claude}% 남음`;
-    demo.setAttribute('aria-label', `예시: ${summary}`);
-    description.textContent = `${example.label} 예시 · ${summary}`;
+    const summary = `Codex ${example.codex}%, Claude ${example.claude}% remaining`;
+    demo.setAttribute('aria-label', `Example: ${summary}`);
+    description.textContent = `${example.label} · ${summary}`;
   }));
   // A schematic of calendar slots, deliberately without money or token values.
   const heights = [12, 0, 24, 36, 18, 0, 31, 47, 65, 27, 0, 39, 53, 35, 76,
