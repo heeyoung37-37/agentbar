@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08090a">
+  <meta name="description" content="Codex와 Claude Code의 주간 잔여량을 두 줄로. AgentBar는 작업의 흐름에 조용히 함께하는 macOS 메뉴바 앱입니다.">
+  <meta property="og:title" content="AgentBar — Less checking. More creating.">
+  <meta property="og:description" content="Codex · Claude Code. 두 에이전트의 주간 잔여량을 하나의 메뉴바에서.">
+  <meta property="og:type" content="website">
+  <title>AgentBar — Less checking. More creating.</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 건너뛰기</a>
+  <header class="site-header">
+    <nav class="nav wrap" aria-label="주 메뉴">
+      <a class="brand" href="#" aria-label="AgentBar 처음으로"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span>AgentBar<span class="version">v0.1.0</span></a>
+      <div class="nav-links"><a href="#experience">미리보기</a><a href="#details">디테일</a><a href="#install">설치</a></div>
+      <a class="nav-github" href="https://github.com/heeyoung37-37/agentbar">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-topline"><span class="eyebrow"><span class="status-dot" aria-hidden="true"></span> A QUIETER WAY TO KEEP TRACK</span><span class="hero-index" aria-hidden="true">UTILITY / 001</span></div>
+      <h1 id="hero-title">Less checking.<br><span class="silver-text">More creating.</span></h1>
+      <div class="hero-bottom">
+        <p class="hero-description">Codex와 Claude Code의 주간 잔여량.<br>작업의 흐름 옆에, 두 줄이면 충분합니다.</p>
+        <div class="hero-actions"><a class="button button-primary" href="https://github.com/heeyoung37-37/agentbar/releases/download/v0.1.0/AgentBar-0.1.0-macos-arm64.zip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg>Mac용 다운로드 <span class="button-version">v0.1.0</span></a><span class="compatibility">Apple Silicon · macOS 14 이상</span></div>
+      </div>
+      <div class="hero-product" role="group" aria-label="AgentBar 메뉴바 표시 재현. 예시 데이터: Codex 62%, Claude 97% 남음.">
+        <div class="desktop-menubar" aria-hidden="true"><span class="desktop-app">◈ <b>AgentBar</b><span>File</span><span>Edit</span><span>View</span></span><div class="native-quota"><div><b>Codex</b><span>62%</span><i><em style="width:62%"></em></i></div><div><b>Claude</b><span>97%</span><i><em style="width:97%"></em></i></div></div><span class="system-icons">◔ &nbsp; ▰ &nbsp; 09:41</span></div>
+        <div class="orb" aria-hidden="true"><div class="orb-inner"></div></div>
+        <div class="product-bottom"><div><span class="eyebrow">ALWAYS IN SIGHT</span><p>두 에이전트.<br>하나의 시선.</p></div><a href="#experience" class="round-link" aria-label="메뉴바 데모 살펴보기">↓</a></div>
+        <span class="product-caption">소스 기반 메뉴바 재현 · 예시 데이터</span>
+      </div>
+      <div class="product-strip"><span>CODEX + CLAUDE CODE</span><span>WEEKLY REMAINING</span><span>MADE FOR macOS</span></div>
+    </section>
+
+    <section id="experience" class="experience wrap section-space" aria-labelledby="experience-title">
+      <div class="section-heading"><div><span class="eyebrow">01 / AT A GLANCE</span><h2 id="experience-title">필요한 정보만.<br><span class="muted">필요한 자리에.</span></h2></div><p>위에는 Codex, 아래에는 Claude.<br>이름, 잔여 퍼센트, 막대를 같은 열에 맞춥니다.</p></div>
+      <div class="demo-surface">
+        <div class="demo-meta"><span><span class="demo-dot" aria-hidden="true"></span> INTERACTIVE PREVIEW</span><span>WEEKLY / REMAINING</span></div>
+        <div class="quota-demo" role="img" aria-label="예시: Codex 62%, Claude 97% 남음" id="quota-demo"><div class="quota-row"><span class="quota-name">Codex</span><span class="quota-percent" id="codex-value">62<span>%</span></span><span class="quota-track"><span id="codex-bar" style="width:62%"></span></span></div><div class="quota-row"><span class="quota-name">Claude</span><span class="quota-percent" id="claude-value">97<span>%</span></span><span class="quota-track"><span id="claude-bar" style="width:97%"></span></span></div></div>
+        <div class="column-guide" aria-hidden="true"><span>PROVIDER</span><span>LEFT</span><span>WEEKLY QUOTA</span></div>
+        <div class="demo-controls"><div class="scenario-buttons" role="group" aria-label="메뉴바 예시 상태"><button type="button" disabled data-scenario="start" aria-pressed="false">작업 시작</button><button type="button" disabled data-scenario="flow" aria-pressed="true">작업 중</button><button type="button" disabled data-scenario="finish" aria-pressed="false">마무리</button></div><p id="scenario-description" aria-live="polite">작업 중 예시 · Codex 62%, Claude 97% 남음</p></div>
+      </div>
+      <p class="demo-disclaimer">위 데모는 실제 렌더러의 열 정렬 구조를 웹으로 재현했습니다. 수치는 모두 가상이며 계정에 연결되지 않습니다. 실제 크기·서체·막대는 macOS 환경에 따라 다릅니다.</p>
+      <noscript><p class="demo-disclaimer">JavaScript가 꺼져 있어 기본 예시를 표시합니다. 다운로드와 설치 안내는 그대로 이용할 수 있습니다.</p></noscript>
+    </section>
+
+    <section id="details" class="details wrap section-space" aria-labelledby="details-title">
+      <div class="section-heading"><div><span class="eyebrow">02 / CONSIDERED DETAILS</span><h2 id="details-title">작은 유틸리티.<br><span class="muted">분명한 디테일.</span></h2></div><p>CodexBar의 기반 위에,<br>매일 보는 메뉴바를 더 단정하게.</p></div>
+      <div class="detail-grid">
+        <article class="detail-card alignment-card"><span class="detail-no">01 — ALIGNMENT</span><div class="alignment-visual" aria-hidden="true"><div><span>Codex</span><b>100%</b><i></i></div><div><span>Claude</span><b>9%</b><i></i></div><div class="alignment-rule"></div></div><h3>숫자가 바뀌어도,<br>흔들리지 않는 정렬.</h3><p>100%에서 한 자리 숫자까지. 고정된 퍼센트 열과 모노스페이스 숫자로 두 줄의 간격을 유지합니다.</p></article>
+        <article class="detail-card monochrome-card"><span class="detail-no">02 — MONOCHROME</span><div class="monochrome-visual" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div><h3>메뉴바에는 단색.<br>정보에는 선명함.</h3><p>주간 막대의 W 표기를 덜고 macOS 기본 단색을 사용합니다. 상세 화면의 기존 제공자 색상은 유지합니다.</p></article>
+      </div>
+      <article class="history-feature"><div class="history-copy"><span class="detail-no">03 — CONTINUITY</span><h3>사용하지 않은 날도,<br>하나의 날짜니까.</h3><p>Claude 비용 차트도 최근 30일의 날짜 칸을 유지합니다. 전체 스캔이 끝난 미사용 날짜만 0으로 표시하고, 확인되지 않은 기록은 구분합니다.</p></div><div class="history-diagram"><div class="chart-header"><span>CLAUDE / DAILY COST</span><span>30 DAYS</span></div><div class="calendar-chart" aria-hidden="true"></div><div class="chart-axis" aria-hidden="true"><span>30일 전</span><span>오늘</span></div><p class="chart-caption">날짜 슬롯 구조를 설명하는 도식 · 실제 비용 데이터 아님</p></div></article>
+    </section>
+
+    <section class="workflow wrap section-space" aria-labelledby="workflow-title"><span class="eyebrow">03 / IN YOUR WORKFLOW</span><h2 id="workflow-title">흐름을 유지하는<br><span class="muted">작은 확인.</span></h2><div class="workflow-grid"><article><span class="workflow-step">01 / BEFORE</span><h3>시작하기 전에</h3><p>오늘의 작업을 열기 전, 두 제공자의 주간 잔여량을 함께 확인하세요.</p></article><article><span class="workflow-step">02 / DURING</span><h3>몰입하는 사이</h3><p>코드나 문서를 그대로 두고 메뉴바를 훑으세요. 어느 제공자에 얼마나 남았는지 보입니다.</p></article><article><span class="workflow-step">03 / AFTER</span><h3>돌아보고 싶을 때</h3><p>앱의 상세 화면에서 최근 30일의 비용 추이를 살펴보세요. 날짜 간격이 유지됩니다.</p></article></div></section>
+
+    <section id="install" class="install wrap section-space" aria-labelledby="install-title"><div class="install-panel"><div class="install-intro"><span class="eyebrow">READY WHEN YOU ARE</span><h2 id="install-title">A little clarity.<br><span class="silver-text">On your Mac.</span></h2><p>AgentBar v0.1.0<br>Apple Silicon(M1 이상) · macOS 14 이상</p><a class="button button-primary" href="https://github.com/heeyoung37-37/agentbar/releases/download/v0.1.0/AgentBar-0.1.0-macos-arm64.zip">Mac용 다운로드 <span aria-hidden="true">↓</span></a><a class="release-link" href="https://github.com/heeyoung37-37/agentbar/releases/tag/v0.1.0">릴리스 노트 &amp; SHA-256 체크섬 <span aria-hidden="true">↗</span></a><p class="signing-note">자체 서명(ad-hoc) · Apple 공증 전 빌드</p></div><ol class="install-steps"><li><span>01</span><div><h3>다운로드하고 옮기기</h3><p>ZIP 압축을 풀고 <code>AgentBar.app</code>을 응용 프로그램 폴더로 옮기세요.</p></div></li><li><span>02</span><div><h3>기존 앱 종료하기</h3><p>설정과 앱 식별자를 공유합니다. 기존 CodexBar 또는 AgentBar를 종료하세요.</p></div></li><li><span>03</span><div><h3>표시 프리셋 적용하기</h3><p>동봉된 <code>Apply AgentBar Preset.command</code>를 실행하세요. 기존 표시 설정을 덮어쓰고 두 제공자를 활성화합니다.</p></div></li><li><span>04</span><div><h3>내 계정 연결하기</h3><p>AgentBar를 열고 본인의 Codex·Claude 계정을 연결하세요. 로그인 정보는 포함되어 있지 않습니다.</p></div></li></ol></div>
+      <div class="install-notes"><details><summary>첫 실행이 차단되면 어떻게 하나요?</summary><p>이 릴리스는 Apple 공증을 받지 않았습니다. 다운로드 출처와 체크섬을 확인한 뒤, 시스템 설정 → 개인정보 보호 및 보안에서 해당 앱의 실행 여부를 직접 확인하세요. 브라우저 세션을 사용하는 경우 본인의 로그인과 macOS 권한 설정이 필요할 수 있습니다.</p></details><details><summary>기존 CodexBar와 함께 사용할 수 있나요?</summary><p>동시에 실행하지 마세요. AgentBar는 CodexBar와 설정·앱 식별자를 공유합니다. 프리셋은 기존 표시 설정을 덮어쓰지만 로그인 정보를 제공하지 않습니다. 자동 업데이트는 꺼져 있으며 새 버전은 GitHub Releases에서 수동 설치합니다.</p></details><details><summary>소스와 빌드 방법은 어디에 있나요?</summary><p>CodexBar v0.76.0의 고정 커밋에 수정 패치를 적용하는 방식입니다. <a href="https://github.com/heeyoung37-37/agentbar/blob/main/DEVELOPMENT.md">개발 문서</a>에서 소스 재구성과 빌드 방법을 확인하세요. Xcode, Swift 6.2 이상, Python 3가 필요합니다. 내부 실행 파일과 일부 설정 화면에는 CodexBar 이름이 남아 있습니다.</p></details></div>
+    </section>
+  </main>
+  <footer class="footer wrap"><div class="footer-top"><a class="brand" href="#"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span>AgentBar</a><span>Quietly, alongside your work.</span><a href="https://github.com/heeyoung37-37/agentbar">소스 살펴보기 <span aria-hidden="true">↗</span></a></div><div class="footer-bottom"><p><a href="https://github.com/steipete/CodexBar/tree/v0.76.0">Peter Steinberger / CodexBar v0.76.0</a> 기반 비공식 수정판.<br>OpenAI 또는 Anthropic의 공식 제품이 아닙니다.</p><div><a href="https://github.com/heeyoung37-37/agentbar/blob/main/LICENSE">MIT License</a><a href="https://github.com/heeyoung37-37/agentbar/blob/main/THIRD_PARTY_NOTICES.md">Third-party notices</a><span>MODIFIED BY HEEYOUNG37-37</span></div></div></footer>
+</body>
+</html>
