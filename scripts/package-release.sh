@@ -29,7 +29,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/agentbar-package.XXXXXX")
 STAGE="$WORK/$NAME"
 mkdir -p "$STAGE"
 APP="$STAGE/AgentBar.app"
-ditto --norsrc --noextattr "$INPUT" "$APP"
+ditto --norsrc --extattr "$INPUT" "$APP"
 python3 - "$APP" "$AGENTBAR_VERSION" "$UPSTREAM_COMMIT" "$ROOT/patches/agentbar.patch" <<'PY'
 import hashlib, json, plistlib, sys
 from pathlib import Path
@@ -85,7 +85,7 @@ for EXTENSION in "$APP"/Contents/PlugIns/*.appex; do
 done
 codesign --force --sign - --preserve-metadata=identifier,entitlements,flags --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
-ditto -c -k --norsrc --noextattr --keepParent "$STAGE" "$DIST/$NAME.zip"
+ditto -c -k --norsrc --extattr --keepParent "$STAGE" "$DIST/$NAME.zip"
 (cd "$DIST" && shasum -a 256 "$NAME.zip" > SHA256SUMS)
 echo "Release ready: $DIST/$NAME.zip"
 echo "Staged app: $APP"

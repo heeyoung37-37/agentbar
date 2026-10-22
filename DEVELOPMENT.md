@@ -59,3 +59,5 @@ Verified on 2026-10-22: 50 tests in 7 focused recovery/throughput suites passed;
 An additional 50 tests in BrowserDetectionTests and OpenAIDashboardBrowserCookieImporterTests passed, for 100 passing focused tests across 9 suites.
 
 Packaging stages bundles outside synced Documents folders and strips only FinderInfo/ResourceFork metadata before nested signing. Provenance/quarantine attributes are not cleared. App and widget release versions are aligned before the final ad-hoc signatures.
+
+The AgentBar build preserves inherited quarantine metadata and leaves macOS launch protection active. Its packaging mode permits this metadata while still requiring strict code signature verification and the isolated resource launch check.

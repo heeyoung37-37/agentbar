@@ -1262,7 +1262,18 @@
          }
 --- a/Scripts/package_app.sh
 +++ b/Scripts/package_app.sh
-@@ -262,8 +262,10 @@
+@@ -63,6 +63,10 @@
+   local quarantined
+   quarantined="$(xattr -r -p com.apple.quarantine "$bundle" 2>/dev/null || true)"
+   if [[ -n "$quarantined" ]]; then
++    if [[ "${CODEXBAR_PRESERVE_QUARANTINE:-0}" == "1" ]]; then
++      echo "Preserving quarantine metadata; macOS launch protection remains active: ${bundle}" >&2
++      return 0
++    fi
+     echo "ERROR: Packaged app still has com.apple.quarantine: ${bundle}" >&2
+     return 1
+   fi
+@@ -262,8 +266,10 @@
  done
  
  APP_FINAL="$ROOT/CodexBar.app"
@@ -1275,16 +1286,16 @@
  APP="$APP_STAGE"
  mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
  mkdir -p "$APP/Contents/Helpers" "$APP/Contents/PlugIns"
-@@ -572,7 +574,7 @@
+@@ -572,7 +578,7 @@
  
  # Embed Sparkle.framework
  SPARKLE_SOURCE=$(codexbar_require_product_directory "$PREFERRED_BUILD_DIR" Sparkle.framework packaging)
 -cp -R "$SPARKLE_SOURCE" "$APP/Contents/Frameworks/"
-+ditto --norsrc --noextattr "$SPARKLE_SOURCE" "$APP/Contents/Frameworks/Sparkle.framework"
++ditto --norsrc --extattr "$SPARKLE_SOURCE" "$APP/Contents/Frameworks/Sparkle.framework"
  chmod -R a+rX "$APP/Contents/Frameworks/Sparkle.framework"
  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CodexBar"
  # Re-sign Sparkle and all nested components with the selected package identity.
-@@ -586,6 +588,9 @@
+@@ -586,6 +592,9 @@
  else
    CODESIGN_ARGS=(--force --timestamp --options runtime --sign "$CODESIGN_ID")
  fi
@@ -1294,7 +1305,7 @@
  function resign() { codesign "${CODESIGN_ARGS[@]}" "$1"; }
  # Validate Sparkle's nested layout before signing so framework layout drift fails clearly.
  SPARKLE_SIGNING_TARGETS=$(codexbar_sparkle_signing_targets "$SPARKLE")
-@@ -637,8 +642,9 @@
+@@ -637,8 +646,9 @@
  # Ensure contents are writable before stripping attributes and signing.
  chmod -R u+w "$APP"
  
@@ -1306,3 +1317,13 @@
  find "$APP" -name '._*' -delete
  
  # Sign helper binaries if present
+--- a/Scripts/test_package_signing.sh
++++ b/Scripts/test_package_signing.sh
+@@ -67,6 +67,7 @@
+   echo "Quarantined app unexpectedly passed integrity verification" >&2
+   exit 1
+ fi
++CODEXBAR_PRESERVE_QUARANTINE=1 verify_packaged_app_integrity "$APP"
+ unset MOCK_QUARANTINE
+ 
+ export MOCK_CODESIGN_STATUS=1

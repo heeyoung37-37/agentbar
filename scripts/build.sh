@@ -8,6 +8,6 @@ fi
 bash "$ROOT/scripts/prepare-source.sh"
 (
   cd "$ROOT/.build/upstream"
-  CODEXBAR_SIGNING=adhoc ./Scripts/package_app.sh release
+  CODEXBAR_SIGNING=adhoc CODEXBAR_PRESERVE_QUARANTINE=1 ./Scripts/package_app.sh release
 )
 bash "$ROOT/scripts/package-release.sh" "$ROOT/.build/upstream/CodexBar.app"
