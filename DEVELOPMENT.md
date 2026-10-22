@@ -57,3 +57,5 @@ Swift 6.3.3 needed an explicit typed subexpression in the existing throughput sp
 Verified on 2026-10-22: 50 tests in 7 focused recovery/throughput suites passed; `make check` passed with zero SwiftLint violations across 3,019 Swift files. These tests use synthetic stores and stubbed HTTP responses, not live account probes.
 
 An additional 50 tests in BrowserDetectionTests and OpenAIDashboardBrowserCookieImporterTests passed, for 100 passing focused tests across 9 suites.
+
+Packaging stages bundles outside synced Documents folders and strips only FinderInfo/ResourceFork metadata before nested signing. Provenance/quarantine attributes are not cleared. App and widget release versions are aligned before the final ad-hoc signatures.

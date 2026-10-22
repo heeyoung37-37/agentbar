@@ -1260,3 +1260,49 @@
                  requests: 50,
                  isPending: index >= 57)
          }
+--- a/Scripts/package_app.sh
++++ b/Scripts/package_app.sh
+@@ -262,8 +262,10 @@
+ done
+ 
+ APP_FINAL="$ROOT/CodexBar.app"
+-APP_STAGE="$ROOT/.build/package/CodexBar.app"
+-rm -rf "$APP_STAGE"
++# Finder/iCloud metadata in synced checkouts can invalidate nested code signatures.
++APP_STAGE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/codexbar-stage.XXXXXX")
++trap 'rm -rf "$APP_STAGE_ROOT"' EXIT
++APP_STAGE="$APP_STAGE_ROOT/CodexBar.app"
+ APP="$APP_STAGE"
+ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+ mkdir -p "$APP/Contents/Helpers" "$APP/Contents/PlugIns"
+@@ -572,7 +574,7 @@
+ 
+ # Embed Sparkle.framework
+ SPARKLE_SOURCE=$(codexbar_require_product_directory "$PREFERRED_BUILD_DIR" Sparkle.framework packaging)
+-cp -R "$SPARKLE_SOURCE" "$APP/Contents/Frameworks/"
++ditto --norsrc --noextattr "$SPARKLE_SOURCE" "$APP/Contents/Frameworks/Sparkle.framework"
+ chmod -R a+rX "$APP/Contents/Frameworks/Sparkle.framework"
+ install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CodexBar"
+ # Re-sign Sparkle and all nested components with the selected package identity.
+@@ -586,6 +588,9 @@
+ else
+   CODESIGN_ARGS=(--force --timestamp --options runtime --sign "$CODESIGN_ID")
+ fi
++# Remove only metadata that code signing rejects, before the first nested signature.
++xattr -r -d com.apple.FinderInfo "$APP" 2>/dev/null || true
++xattr -r -d com.apple.ResourceFork "$APP" 2>/dev/null || true
+ function resign() { codesign "${CODESIGN_ARGS[@]}" "$1"; }
+ # Validate Sparkle's nested layout before signing so framework layout drift fails clearly.
+ SPARKLE_SIGNING_TARGETS=$(codexbar_sparkle_signing_targets "$SPARKLE")
+@@ -637,8 +642,9 @@
+ # Ensure contents are writable before stripping attributes and signing.
+ chmod -R u+w "$APP"
+ 
+-# Strip extended attributes to prevent AppleDouble (._*) files that break code sealing
+-xattr -cr "$APP"
++# Keep provenance/quarantine attributes intact; remove only signing-incompatible metadata.
++xattr -r -d com.apple.FinderInfo "$APP" 2>/dev/null || true
++xattr -r -d com.apple.ResourceFork "$APP" 2>/dev/null || true
+ find "$APP" -name '._*' -delete
+ 
+ # Sign helper binaries if present
