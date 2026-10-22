@@ -45,6 +45,12 @@ data['SUFeedURL'] = ''
 data['SUEnableAutomaticChecks'] = False
 data['SUAutomaticallyUpdate'] = False
 info.write_bytes(plistlib.dumps(data, sort_keys=False))
+for extension in (app / 'Contents/PlugIns').glob('*.appex'):
+    extension_info = extension / 'Contents/Info.plist'
+    extension_data = plistlib.loads(extension_info.read_bytes())
+    extension_data['CFBundleShortVersionString'] = sys.argv[2]
+    extension_data['CFBundleVersion'] = sys.argv[2]
+    extension_info.write_bytes(plistlib.dumps(extension_data, sort_keys=False))
 manifest = {
     'agentbar_version': sys.argv[2],
     'upstream_version': upstream_version,
@@ -73,6 +79,10 @@ cp "$ROOT/docs/menubar.png" "$STAGE/docs/menubar.png"
 # Do not remove quarantine flags or modify the installed source application.
 xattr -r -d com.apple.FinderInfo "$APP" 2>/dev/null || true
 xattr -r -d com.apple.ResourceFork "$APP" 2>/dev/null || true
+for EXTENSION in "$APP"/Contents/PlugIns/*.appex; do
+  [[ -d "$EXTENSION" ]] || continue
+  codesign --force --sign - --preserve-metadata=identifier,entitlements,flags --timestamp=none "$EXTENSION"
+done
 codesign --force --sign - --preserve-metadata=identifier,entitlements,flags --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 ditto -c -k --norsrc --noextattr --keepParent "$STAGE" "$DIST/$NAME.zip"
