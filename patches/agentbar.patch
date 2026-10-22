@@ -1,3 +1,24 @@
+--- a/Sources/CodexBar/InlineUsageDashboardContent.swift
++++ b/Sources/CodexBar/InlineUsageDashboardContent.swift
+@@ -314,7 +314,8 @@
+             days: Self.inlineCostHistoryDays(
+                 snapshot: snapshot,
+                 historyDays: historyDays,
+-                preservesCalendarDays: tokenCost.preservesCalendarDaysInCharts,
++                // Claude keeps the same daily slots as Codex, even with only one logged day.
++                preservesCalendarDays: tokenCost.preservesCalendarDaysInCharts || input.provider == .claude,
+                 calendar: input.costUsageBucketCalendar),
+             displayCurrencyCode: displayCurrencyCode,
+             convertedValue: convertedValue)
+@@ -511,7 +512,7 @@
+             days: Self.inlineCostHistoryDays(
+                 snapshot: snapshot,
+                 historyDays: historyDays,
+-                preservesCalendarDays: config.preservesCalendarDaysInCharts,
++                preservesCalendarDays: config.preservesCalendarDaysInCharts || provider == .claude,
+                 calendar: calendar),
+             displayCurrencyCode: "USD",
+             convertedValue: { $0 },
 --- a/Sources/CodexBar/MenuBarLayoutRenderer.swift
 +++ b/Sources/CodexBar/MenuBarLayoutRenderer.swift
 @@ -289,6 +289,7 @@
@@ -8,12 +29,10 @@
      private static let stackedBaselineOffset: CGFloat = -3 // Center multi-line NSStatusBarButton titles.
      private static let singleLineBaselineOffset: CGFloat = -1 // Drop single-line titles slightly for optical centering.
  
-@@ -355,57 +356,8 @@
- 
-     func removeAll() {
+@@ -357,55 +358,6 @@
          self.cache.removeAll()
--    }
--
+     }
+ 
 -    /// Joins two rows independently rendered for different providers (each with
 -    /// `forceStackedStyle: true`) into a single stacked status item title. Used by the "Stacked"
 -    /// combined-icon style, which shows exactly two providers' own single-line content on top of
@@ -49,8 +68,8 @@
 -            accessibilityLabel: accessibilityLabel,
 -            leadingIcon: nil,
 -            statusImage: nil)
-     }
- 
+-    }
+-
 -    private static func namingProvider(
 -        _ providerName: String,
 -        in row: MenuBarLayoutRenderedTitle)
@@ -207,24 +226,1037 @@
  
          let result = NSMutableAttributedString()
          if !prefix.isEmpty {
---- a/Sources/CodexBar/InlineUsageDashboardContent.swift
-+++ b/Sources/CodexBar/InlineUsageDashboardContent.swift
-@@ -314,7 +314,8 @@
-             days: Self.inlineCostHistoryDays(
-                 snapshot: snapshot,
-                 historyDays: historyDays,
--                preservesCalendarDays: tokenCost.preservesCalendarDaysInCharts,
-+                // Claude keeps the same daily slots as Codex, even with only one logged day.
-+                preservesCalendarDays: tokenCost.preservesCalendarDaysInCharts || input.provider == .claude,
-                 calendar: input.costUsageBucketCalendar),
-             displayCurrencyCode: displayCurrencyCode,
-             convertedValue: convertedValue)
-@@ -511,7 +512,7 @@
-             days: Self.inlineCostHistoryDays(
-                 snapshot: snapshot,
-                 historyDays: historyDays,
--                preservesCalendarDays: config.preservesCalendarDaysInCharts,
-+                preservesCalendarDays: config.preservesCalendarDaysInCharts || provider == .claude,
-                 calendar: calendar),
-             displayCurrencyCode: "USD",
-             convertedValue: { $0 },
+--- a/Sources/CodexBar/Providers/Claude/ClaudeProviderImplementation.swift
++++ b/Sources/CodexBar/Providers/Claude/ClaudeProviderImplementation.swift
+@@ -329,7 +329,9 @@
+             // to reading Claude Code's Keychain item or usage arrives via the Claude CLI fallback.
+             return ("Allow reading Claude Code's credentials in Settings…", .providerSettings(.claude))
+         }
+-        if self.shouldOpenSettingsForCloudflareChallenge(context: context) {
++        if context.store.claudeWebCookieAccessFailed ||
++            self.shouldOpenSettingsForCloudflareChallenge(context: context)
++        {
+             return ("Open Claude Settings…", .providerSettings(.claude))
+         }
+         if self.shouldOpenBrowserForWebSessionError(context: context) {
+@@ -376,7 +378,7 @@
+             ClaudeWebAPIFetcher.FetchError.noSessionKeyFound.localizedDescription,
+             ClaudeWebAPIFetcher.FetchError.invalidSessionKey.localizedDescription,
+         ]
+-        if sessionErrors.contains(error) {
++        if sessionErrors.map({ L($0) }).contains(error) {
+             return true
+         }
+ 
+--- a/Sources/CodexBar/Providers/Claude/ClaudeProviderRuntime.swift
++++ b/Sources/CodexBar/Providers/Claude/ClaudeProviderRuntime.swift
+@@ -1,21 +1,126 @@
+ import CodexBarCore
++import Foundation
+ 
+ @MainActor
+ final class ClaudeProviderRuntime: ProviderRuntime {
+     let id: UsageProvider = .claude
+     private var lastSwapConfiguration: Configuration?
++    private var recoveryTask: Task<Void, Never>?
++    private var recoveryAttempt = 0
++    private var pendingRecoveryDelay: TimeInterval?
++    private var recoveryGeneration = UUID()
++    private var recoveryConfigurationRevision: UInt64?
++    #if DEBUG
++    var _test_recoveryScheduled: ((TimeInterval) -> Void)?
++    var _test_recoverySleep: (@Sendable (TimeInterval) async throws -> Void)?
++    var _test_recoveryRefresh: (@MainActor () async -> Void)?
++    #endif
++
++    nonisolated init() {}
++
++    deinit {
++        self.recoveryTask?.cancel()
++    }
+ 
+     func start(context: ProviderRuntimeContext) {
+         self.reconcileSwapConfiguration(context: context)
+     }
+ 
+     func stop(context: ProviderRuntimeContext) {
++        self.cancelRecovery()
+         self.lastSwapConfiguration = nil
+         context.store.clearClaudeSwapAccountState()
+     }
+ 
+     func settingsDidChange(context: ProviderRuntimeContext) {
++        let revision = context.settings.providerConfigRevision(for: .claude)
++        if self.recoveryConfigurationRevision != revision {
++            self.cancelRecovery()
++            self.recoveryConfigurationRevision = revision
++        }
+         self.reconcileSwapConfiguration(context: context)
++    }
++
++    func providerDidRefresh(context _: ProviderRuntimeContext, provider: UsageProvider) {
++        guard provider == .claude else { return }
++        self.cancelRecovery()
++    }
++
++    func providerDidFail(context: ProviderRuntimeContext, provider: UsageProvider, error: Error) {
++        guard provider == .claude else { return }
++        context.store.claudeWebCookieAccessFailed = ClaudeWebRecoveryPolicy.isCookieAccessFailure(error)
++        let source = context.settings.claudeUsageDataSource
++        let webAttempt = context.store.fetchAttempts(for: .claude).last?.kind == .web
++        guard context.store.isEnabled(.claude),
++              source == .web || (source == .auto && (webAttempt || error is ClaudeWebAPIFetcher.FetchError)),
++              let delay = ClaudeWebRecoveryPolicy.retryDelay(after: error, attempt: self.recoveryAttempt)
++        else {
++            self.cancelRecovery()
++            return
++        }
++        if self.recoveryTask != nil {
++            // A new rate limit or challenge must postpone an already scheduled fast local retry.
++            guard delay == 300, self.pendingRecoveryDelay != 300 else { return }
++            self.recoveryTask?.cancel()
++            self.recoveryTask = nil
++            self.recoveryGeneration = UUID()
++        }
++        var startsRecovery = context.store.startupBehavior.automaticallyStartsBackgroundWork
++        #if DEBUG
++        startsRecovery = startsRecovery || self._test_recoveryScheduled != nil
++        #endif
++        guard startsRecovery else { return }
++        let revision = context.settings.providerConfigRevision(for: .claude)
++        self.recoveryConfigurationRevision = revision
++        let generation = self.recoveryGeneration
++        self.recoveryAttempt = min(self.recoveryAttempt + 1, 4)
++        self.pendingRecoveryDelay = delay
++        #if DEBUG
++        self._test_recoveryScheduled?(delay)
++        let sleep = self._test_recoverySleep
++        let refresh = self._test_recoveryRefresh
++        #endif
++        self.recoveryTask = Task { @MainActor [weak self, weak store = context.store] in
++            do {
++                #if DEBUG
++                if let sleep {
++                    try await sleep(delay)
++                } else {
++                    try await Task.sleep(for: .seconds(delay))
++                }
++                #else
++                try await Task.sleep(for: .seconds(delay))
++                #endif
++                guard let self, let store, !Task.isCancelled,
++                      self.recoveryGeneration == generation,
++                      store.isEnabled(.claude),
++                      store.settings.providerConfigRevision(for: .claude) == revision
++                else { return }
++                self.recoveryTask = nil
++                self.pendingRecoveryDelay = nil
++                store.browserDetection.clearCache()
++                // Keep background retries prompt-free and use the normal account/publication coordinator.
++                await ProviderInteractionContext.$current.withValue(.background) {
++                    #if DEBUG
++                    if let refresh {
++                        await refresh()
++                        return
++                    }
++                    #endif
++                    await store.refreshProvider(.claude, coalesceIfRefreshing: true)
++                }
++            } catch {
++                return
++            }
++        }
++    }
++
++    private func cancelRecovery() {
++        self.recoveryGeneration = UUID()
++        self.recoveryTask?.cancel()
++        self.recoveryTask = nil
++        self.recoveryAttempt = 0
++        self.pendingRecoveryDelay = nil
+     }
+ 
+     private func reconcileSwapConfiguration(context: ProviderRuntimeContext) {
+@@ -40,3 +145,20 @@
+         let executablePath: String
+     }
+ }
++
++extension UsageStore {
++    static func claudeWebFailureMessage(_ error: Error) -> String {
++        switch error {
++        case let ClaudeWebAPIFetcher.FetchError.cookieAccessDenied(browser):
++            L(
++                "claude_web_permission_required",
++                browser)
++        case let ClaudeWebAPIFetcher.FetchError.cookieReadFailed(browser):
++            L(
++                "claude_web_cookie_read_failed",
++                browser)
++        default:
++            L(error.localizedDescription)
++        }
++    }
++}
+--- a/Sources/CodexBar/Resources/ar.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/ar.lproj/Localizable.strings
+@@ -2633,3 +2633,9 @@
+ "API credit" = "رصيد API";
+ "Purchased credit" = "رصيد مشترى";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "يعرض Claude Platform رصيد الائتمان في Console والإنفاق الشهري، وليس سجل تكلفة الرموز المحلي.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/ca.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/ca.lproj/Localizable.strings
+@@ -2631,3 +2631,9 @@
+ "API credit" = "Crèdit d'API";
+ "Purchased credit" = "Crèdit comprat";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform mostra el saldo de crèdit i la despesa mensual de la Console, no l'historial de costos local de tokens.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/de.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/de.lproj/Localizable.strings
+@@ -2627,3 +2627,9 @@
+ "API credit" = "API-Guthaben";
+ "Purchased credit" = "Gekauftes Guthaben";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform zeigt Console-Guthaben und monatliche Ausgaben an, nicht den lokalen Token-Kostenverlauf.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/en.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/en.lproj/Localizable.strings
+@@ -2634,3 +2634,9 @@
+ "API credit" = "API credit";
+ "Purchased credit" = "Purchased credit";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform exposes Console credit balance and monthly spend, not local token cost history.";
++
++/* AgentBar Claude web recovery */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/es.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/es.lproj/Localizable.strings
+@@ -2627,3 +2627,9 @@
+ "API credit" = "Crédito de API";
+ "Purchased credit" = "Crédito comprado";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform muestra el saldo de crédito y el gasto mensual de la Console, no el historial de costos local de tokens.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/fa.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/fa.lproj/Localizable.strings
+@@ -2633,3 +2633,9 @@
+ "API credit" = "اعتبار API";
+ "Purchased credit" = "اعتبار خریداری‌شده";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform موجودی اعتبار و هزینه ماهانه Console را نشان می‌دهد، نه تاریخچه هزینه محلی توکن‌ها.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/fr.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/fr.lproj/Localizable.strings
+@@ -2628,3 +2628,9 @@
+ "API credit" = "Crédit API";
+ "Purchased credit" = "Crédit acheté";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform affiche le solde de crédit et les dépenses mensuelles de la Console, et non l'historique local des coûts de jetons.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/gl.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/gl.lproj/Localizable.strings
+@@ -2628,3 +2628,9 @@
+ "API credit" = "Crédito da API";
+ "Purchased credit" = "Crédito comprado";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform mostra o saldo de crédito e o gasto mensual da Console, non o historial local de custos de tokens.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/id.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/id.lproj/Localizable.strings
+@@ -2630,3 +2630,9 @@
+ "API credit" = "Kredit API";
+ "Purchased credit" = "Kredit yang dibeli";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform menampilkan saldo kredit dan pembelanjaan bulanan Console, bukan riwayat biaya token lokal.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/it.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/it.lproj/Localizable.strings
+@@ -2633,3 +2633,9 @@
+ "API credit" = "Credito API";
+ "Purchased credit" = "Credito acquistato";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform mostra il saldo del credito e la spesa mensile della Console, non la cronologia locale dei costi dei token.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/ja.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/ja.lproj/Localizable.strings
+@@ -2629,3 +2629,9 @@
+ "API credit" = "API クレジット";
+ "Purchased credit" = "購入済みクレジット";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform は、ローカルのトークンコスト履歴ではなく、Console のクレジット残高と月間支出を表示します。";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/ko.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/ko.lproj/Localizable.strings
+@@ -2597,3 +2597,9 @@
+ "API credit" = "API 크레딧";
+ "Purchased credit" = "구매한 크레딧";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform은 로컬 토큰 비용 내역이 아닌 Console 크레딧 잔액과 월간 지출을 표시합니다.";
++
++/* AgentBar Claude web recovery */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "[로그인 없음] 브라우저에서 claude.ai에 로그인해 주세요. 자동으로 재시도합니다.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "[로그인 만료] claude.ai에 다시 로그인해 주세요. 자동으로 재시도합니다.";
++"claude_web_permission_required" = "[접근 권한 필요: %@] 전체 디스크 접근 권한 또는 브라우저 키체인 접근을 확인해 주세요. 자동으로 재시도합니다.";
++"claude_web_cookie_read_failed" = "[쿠키 읽기 오류: %@] 브라우저 데이터를 읽지 못해 로그인 상태를 확인할 수 없습니다. 자동으로 재시도합니다.";
+--- a/Sources/CodexBar/Resources/nl.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/nl.lproj/Localizable.strings
+@@ -2626,3 +2626,9 @@
+ "API credit" = "API-tegoed";
+ "Purchased credit" = "Gekocht tegoed";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform toont het Console-tegoed en de maandelijkse uitgaven, niet de lokale tokenkostengeschiedenis.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/pl.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/pl.lproj/Localizable.strings
+@@ -2632,3 +2632,9 @@
+ "API credit" = "Kredyt API";
+ "Purchased credit" = "Kupiony kredyt";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform pokazuje saldo kredytów i miesięczne wydatki w Console, a nie lokalną historię kosztów tokenów.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/pt-BR.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/pt-BR.lproj/Localizable.strings
+@@ -2629,3 +2629,9 @@
+ "API credit" = "Crédito de API";
+ "Purchased credit" = "Crédito comprado";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform mostra o saldo de créditos e os gastos mensais do Console, e não o histórico local de custos de tokens.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/ru.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/ru.lproj/Localizable.strings
+@@ -2630,3 +2630,9 @@
+ "API credit" = "Кредит API";
+ "Purchased credit" = "Купленный кредит";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform показывает баланс кредитов и ежемесячные расходы в Console, а не локальную историю затрат на токены.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/sv.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/sv.lproj/Localizable.strings
+@@ -2628,3 +2628,9 @@
+ "API credit" = "API-kredit";
+ "Purchased credit" = "Köpt kredit";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform visar Console-kreditsaldo och månadsutgifter, inte lokal tokenkostnadshistorik.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/th.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/th.lproj/Localizable.strings
+@@ -2631,3 +2631,9 @@
+ "API credit" = "เครดิต API";
+ "Purchased credit" = "เครดิตที่ซื้อ";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform แสดงยอดเครดิตและการใช้จ่ายรายเดือนของ Console ไม่ใช่ประวัติต้นทุนโทเค็นในเครื่อง";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/tr.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/tr.lproj/Localizable.strings
+@@ -2632,3 +2632,9 @@
+ "API credit" = "API kredisi";
+ "Purchased credit" = "Satın alınan kredi";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform, yerel token maliyet geçmişini değil, Console kredi bakiyesini ve aylık harcamayı gösterir.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/uk.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/uk.lproj/Localizable.strings
+@@ -2629,3 +2629,9 @@
+ "API credit" = "Кредит API";
+ "Purchased credit" = "Придбаний кредит";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform показує баланс кредитів і щомісячні витрати в Console, а не локальну історію витрат на токени.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/vi.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/vi.lproj/Localizable.strings
+@@ -2630,3 +2630,9 @@
+ "API credit" = "Tín dụng API";
+ "Purchased credit" = "Tín dụng đã mua";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform hiển thị số dư tín dụng và chi tiêu hàng tháng trên Console, không phải lịch sử chi phí token cục bộ.";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/zh-Hans.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/zh-Hans.lproj/Localizable.strings
+@@ -2621,3 +2621,9 @@
+ "API credit" = "API 额度";
+ "Purchased credit" = "已购买额度";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform 显示 Console 额度余额和每月支出，而不是本地 token 成本历史记录。";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/Resources/zh-Hant.lproj/Localizable.strings
++++ b/Sources/CodexBar/Resources/zh-Hant.lproj/Localizable.strings
+@@ -2607,3 +2607,9 @@
+ "API credit" = "API 額度";
+ "Purchased credit" = "已購買額度";
+ "Claude Platform exposes Console credit balance and monthly spend, not local token cost history." = "Claude Platform 顯示 Console 額度餘額和每月支出，而不是本地 token 成本歷史記錄。";
++
++/* AgentBar Claude web recovery (English fallback) */
++"Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically." = "Login not found: sign in to claude.ai in your browser. AgentBar will retry automatically.";
++"Sign in to claude.ai (or refresh Claude cookies) to load usage data." = "Sign in to claude.ai (or refresh Claude cookies) to load usage data.";
++"claude_web_permission_required" = "Permission required (%@): allow this app to read browser cookies in Full Disk Access or browser Keychain access. Retrying automatically.";
++"claude_web_cookie_read_failed" = "Cookie read failed (%@): browser data could not be loaded. Login status is unknown. Retrying automatically.";
+--- a/Sources/CodexBar/UsageStore+BackgroundRefresh.swift
++++ b/Sources/CodexBar/UsageStore+BackgroundRefresh.swift
+@@ -55,6 +55,7 @@
+             self.kiloScopeSnapshots = []
+         }
+         if provider == .claude {
++            self.claudeWebCookieAccessFailed = false
+             self.widgetUsagePreservationBlockedProviders.insert(provider.instanceID)
+             self.clearClaudeSwapAccountState()
+         }
+--- a/Sources/CodexBar/UsageStore+Refresh.swift
++++ b/Sources/CodexBar/UsageStore+Refresh.swift
+@@ -672,6 +672,7 @@
+                     generation: context.generation)
+                 return nil
+             }
++            if provider == .claude { self.claudeWebCookieAccessFailed = false }
+             self.lastFetchAttempts[provider.instanceID] = attempts
+             let resetBackfillSource = if provider == .codex {
+                 context.codexLimitResetOwnerKey == nil
+@@ -1409,9 +1410,10 @@
+                     (context.claudeUsesConsumerAutoPipeline ||
+                         Self.isClaudeCLIRateLimitFailure(error) ||
+                         isTerminalClaudeCLIParseFailure))
+-            let shouldSurface = self.shouldSurfaceProviderRefreshFailure(
+-                provider: provider,
+-                state: (hadPriorData, preservesPriorData, restoredClaudeHistory))
++            let shouldSurface = (provider == .claude && ClaudeWebRecoveryPolicy.isCookieAccessFailure(error)) ||
++                self.shouldSurfaceProviderRefreshFailure(
++                    provider: provider,
++                    state: (hadPriorData, preservesPriorData, restoredClaudeHistory))
+             let preservesClaudeWebSessionFailure =
+                 provider == .claude &&
+                 hadPriorData &&
+@@ -1434,7 +1436,9 @@
+                 return
+             }
+             if shouldSurface {
+-                self.errors[provider.instanceID] = error.localizedDescription
++                self.errors[provider.instanceID] = provider == .claude
++                    ? Self.claudeWebFailureMessage(error)
++                    : error.localizedDescription
+                 if !preservesPriorData, !preservesClaudeWebSessionFailure {
+                     self.snapshots.removeValue(forKey: provider.instanceID)
+                     if Self.tokenCostRequiresProviderSnapshot(provider), grokLocalFallback == nil {
+--- a/Sources/CodexBar/UsageStore.swift
++++ b/Sources/CodexBar/UsageStore.swift
+@@ -167,6 +167,7 @@
+     var claudeSwapAccountSnapshots: [ProviderAccountUsageSnapshot] = []
+     var claudeSwapLastRefreshAt: Date?
+     var claudeSwapLastError: String?
++    var claudeWebCookieAccessFailed = false
+     var claudeSwapDetectedVersion: String?
+     var claudeSwapRevision: UInt64 = 0
+     @ObservationIgnored var claudeSwapRefreshTask: Task<Void, Never>?
+--- a/Sources/CodexBarCore/BrowserDetection.swift
++++ b/Sources/CodexBarCore/BrowserDetection.swift
+@@ -141,9 +141,17 @@
+ 
+     func cookieSourceProfileAccessIssue(_ browser: Browser) -> BrowserProfileAccessIssue? {
+         let homeURL = URL(fileURLWithPath: self.homeDirectory, isDirectory: true)
+-        guard BrowserCookieAccessGate.cookieStoreAccessDecision(homeDirectories: [homeURL]) == .allowed,
+-              browser != .safari,
+-              self.detectAppInstalled(for: browser),
++        guard BrowserCookieAccessGate.cookieStoreAccessDecision(homeDirectories: [homeURL]) == .allowed else {
++            return nil
++        }
++        if browser == .safari {
++            // A denied directory can look absent to cookie-store discovery. Probe metadata only,
++            // after an unsuccessful import, so it cannot be mistaken for a missing login.
++            let issues = self.safariCookieAccessProbePaths().compactMap(self.profileAccessIssue)
++            if issues.contains(.accessDenied) { return .accessDenied }
++            return issues.first
++        }
++        guard self.detectAppInstalled(for: browser),
+               let profilePath = self.profilePath(for: browser, homeDirectory: self.homeDirectory)
+         else {
+             return nil
+--- a/Sources/CodexBarCore/Providers/Claude/ClaudeWeb/ClaudeWebAPIFetcher.swift
++++ b/Sources/CodexBarCore/Providers/Claude/ClaudeWeb/ClaudeWebAPIFetcher.swift
+@@ -145,6 +145,8 @@
+ 
+     public enum FetchError: LocalizedError, Sendable {
+         case noSessionKeyFound
++        case cookieAccessDenied(browser: String)
++        case cookieReadFailed(browser: String)
+         case invalidSessionKey
+         case notSupportedOnThisPlatform
+         case networkError(Error)
+@@ -158,7 +160,15 @@
+         public var errorDescription: String? {
+             switch self {
+             case .noSessionKeyFound:
+-                "No Claude session key found in browser cookies."
++                "Login not found: sign in to claude.ai in your browser. " +
++                    "AgentBar will retry automatically."
++            case let .cookieAccessDenied(browser):
++                "Permission required (\(browser)): browser cookies could not be read. " +
++                    "Check Full Disk Access for this app, or browser Keychain access. " +
++                    "AgentBar will retry automatically."
++            case let .cookieReadFailed(browser):
++                "Cookie read failed (\(browser)): the browser cookie store could not be loaded. " +
++                    "This does not confirm that you are signed out. AgentBar will retry automatically."
+             case .invalidSessionKey:
+                 "Invalid Claude session key format."
+             case .notSupportedOnThisPlatform:
+@@ -530,6 +540,8 @@
+         let log: (String) -> Void = { msg in logger?(msg) }
+ 
+         let cookieDomains = ["claude.ai"]
++        var deniedBrowser: String?
++        var unreadableBrowser: String?
+ 
+         return try KeychainAccessPreflight.withMemoizedGenericPasswordChecks {
+             // Evaluate sources on demand so a successful preferred browser avoids later Keychain preflights.
+@@ -559,12 +571,31 @@
+                                 cookieCount: source.records.count)
+                         }
+                     }
++                    if browserSource == .safari,
++                       browserDetection.cookieSourceProfileAccessIssue(.safari) == .accessDenied
++                    {
++                        deniedBrowser = deniedBrowser ?? browserSource.displayName
++                    }
+                 } catch {
+                     BrowserCookieAccessGate.recordIfNeeded(error)
++                    if ClaudeWebRecoveryPolicy.isPermissionError(error) ||
++                        (browserSource == .safari &&
++                            browserDetection.cookieSourceProfileAccessIssue(.safari) == .accessDenied)
++                    {
++                        deniedBrowser = deniedBrowser ?? browserSource.displayName
++                    } else if !ClaudeWebRecoveryPolicy.isMissingCookieStore(error) {
++                        unreadableBrowser = unreadableBrowser ?? browserSource.displayName
++                    }
+                     log("\(browserSource.displayName) cookie load failed: \(error.localizedDescription)")
+                 }
+             }
+ 
++            if let deniedBrowser {
++                throw FetchError.cookieAccessDenied(browser: deniedBrowser)
++            }
++            if let unreadableBrowser {
++                throw FetchError.cookieReadFailed(browser: unreadableBrowser)
++            }
+             throw FetchError.noSessionKeyFound
+         }
+     }
+@@ -1430,6 +1461,10 @@
+         do {
+             sessionInfo = try self.extractSessionKeyInfo(browserDetection: browserDetection, logger: log)
+         } catch {
++            // A new cookie-access failure is more actionable than the stale cookie's 401.
++            if ClaudeWebRecoveryPolicy.isCookieAccessFailure(error) {
++                throw error
++            }
+             if let invalidatedCacheError {
+                 throw invalidatedCacheError
+             }
+--- /dev/null
++++ b/Sources/CodexBarCore/Providers/Claude/ClaudeWeb/ClaudeWebRecoveryPolicy.swift
+@@ -0,0 +1,62 @@
++import Foundation
++import SweetCookieKit
++
++/// Non-secret classification shared by the browser importer and background recovery.
++public enum ClaudeWebRecoveryPolicy {
++    public static func isPermissionError(_ error: Error) -> Bool {
++        self.isPermissionError(error, depth: 0)
++    }
++
++    private static func isPermissionError(_ error: Error, depth: Int) -> Bool {
++        guard depth < 8 else { return false }
++        if case BrowserCookieError.accessDenied = error { return true }
++        let cocoa = error as NSError
++        if cocoa.domain == NSCocoaErrorDomain, cocoa.code == NSFileReadNoPermissionError { return true }
++        if cocoa.domain == NSPOSIXErrorDomain, cocoa.code == 1 || cocoa.code == 13 { return true }
++        if let underlying = cocoa.userInfo[NSUnderlyingErrorKey] as? Error {
++            return self.isPermissionError(underlying, depth: depth + 1)
++        }
++        return false
++    }
++
++    static func isMissingCookieStore(_ error: Error) -> Bool {
++        if case BrowserCookieError.notFound = error { return true }
++        return (error as NSError).domain == NSCocoaErrorDomain &&
++            (error as NSError).code == NSFileReadNoSuchFileError
++    }
++
++    public static func isCookieAccessFailure(_ error: Error) -> Bool {
++        switch error {
++        case ClaudeWebAPIFetcher.FetchError.cookieAccessDenied,
++             ClaudeWebAPIFetcher.FetchError.cookieReadFailed:
++            true
++        default:
++            false
++        }
++    }
++
++    /// Recheck local sessions quickly after startup; never hammer a remote rate limit or challenge.
++    public static func retryDelay(after error: Error, attempt: Int) -> TimeInterval? {
++        let delays: [TimeInterval] = [15, 30, 60, 120, 300]
++        let delay = delays[min(max(attempt, 0), delays.count - 1)]
++        switch error {
++        case ClaudeWebAPIFetcher.FetchError.noSessionKeyFound,
++             ClaudeWebAPIFetcher.FetchError.invalidSessionKey,
++             ClaudeWebAPIFetcher.FetchError.cookieAccessDenied,
++             ClaudeWebAPIFetcher.FetchError.cookieReadFailed,
++             ClaudeWebAPIFetcher.FetchError.unauthorized:
++            return delay
++        case ClaudeWebAPIFetcher.FetchError.cloudflareChallenge:
++            return 300
++        case let ClaudeWebAPIFetcher.FetchError.serverError(statusCode):
++            return statusCode == 429 ? 300 : (statusCode >= 500 ? delay : nil)
++        case let ClaudeWebAPIFetcher.FetchError.networkError(underlying):
++            return self.retryDelay(after: underlying, attempt: attempt)
++        default:
++            if let urlError = error as? URLError, urlError.code != .cancelled {
++                return delay
++            }
++            return nil
++        }
++    }
++}
+--- /dev/null
++++ b/Tests/CodexBarTests/ClaudeWebAutomaticRecoveryTests.swift
+@@ -0,0 +1,143 @@
++import CodexBarCore
++import Foundation
++import Testing
++@testable import CodexBar
++
++@MainActor
++@Suite(.serialized)
++struct ClaudeWebAutomaticRecoveryTests {
++    @Test
++    func `recovery coalesces failures and cancels on success and disable`() throws {
++        let (context, root) = try self.makeContext()
++        defer { try? FileManager.default.removeItem(at: root) }
++        let runtime = ClaudeProviderRuntime()
++        var scheduled: [TimeInterval] = []
++        runtime._test_recoveryScheduled = { scheduled.append($0) }
++        let failure = ClaudeWebAPIFetcher.FetchError.cookieAccessDenied(browser: "Safari")
++        runtime.providerDidFail(context: context, provider: .claude, error: failure)
++        runtime.providerDidFail(context: context, provider: .claude, error: failure)
++        #expect(scheduled == [15])
++        runtime.providerDidRefresh(context: context, provider: .claude)
++        runtime.providerDidFail(context: context, provider: .claude, error: failure)
++        #expect(scheduled == [15, 15])
++        try context.settings.setProviderEnabled(
++            provider: .claude, metadata: #require(ProviderRegistry.shared.metadata[.claude]), enabled: false)
++        runtime.stop(context: context)
++        runtime.providerDidFail(context: context, provider: .claude, error: failure)
++        #expect(scheduled == [15, 15])
++    }
++
++    @Test
++    func `rate limiting postpones an already queued fast retry`() throws {
++        let (context, root) = try self.makeContext()
++        defer { try? FileManager.default.removeItem(at: root) }
++        let runtime = ClaudeProviderRuntime()
++        var scheduled: [TimeInterval] = []
++        runtime._test_recoveryScheduled = { scheduled.append($0) }
++        runtime.providerDidFail(
++            context: context, provider: .claude, error: ClaudeWebAPIFetcher.FetchError.noSessionKeyFound)
++        runtime.providerDidFail(
++            context: context,
++            provider: .claude,
++            error: ClaudeWebAPIFetcher.FetchError.serverError(statusCode: 429))
++        #expect(scheduled == [15, 300])
++        runtime.providerDidFail(
++            context: context, provider: .claude, error: ClaudeWebAPIFetcher.FetchError.noSessionKeyFound)
++        #expect(scheduled == [15, 300])
++        runtime.stop(context: context)
++    }
++
++    @Test
++    func `recovery runs in background and progresses without a normal refresh timer`() async throws {
++        let (context, root) = try self.makeContext()
++        defer { try? FileManager.default.removeItem(at: root) }
++        let runtime = ClaudeProviderRuntime()
++        var scheduled: [TimeInterval] = []
++        var refreshes = 0
++        runtime._test_recoveryScheduled = { scheduled.append($0) }
++        runtime._test_recoverySleep = { _ in }
++        runtime._test_recoveryRefresh = {
++            #expect(ProviderInteractionContext.current == .background)
++            refreshes += 1
++        }
++        let failure = ClaudeWebAPIFetcher.FetchError.noSessionKeyFound
++        runtime.providerDidFail(context: context, provider: .claude, error: failure)
++        for _ in 0..<100 where refreshes == 0 {
++            await Task.yield()
++        }
++        #expect(refreshes == 1)
++        runtime.providerDidFail(context: context, provider: .claude, error: failure)
++        #expect(scheduled == [15, 30])
++        runtime.stop(context: context)
++    }
++
++    @Test
++    func `switching away from web cancels pending recovery`() throws {
++        let (context, root) = try self.makeContext()
++        defer { try? FileManager.default.removeItem(at: root) }
++        let runtime = ClaudeProviderRuntime()
++        var scheduled: [TimeInterval] = []
++        runtime._test_recoveryScheduled = { scheduled.append($0) }
++        runtime.providerDidFail(
++            context: context, provider: .claude, error: ClaudeWebAPIFetcher.FetchError.noSessionKeyFound)
++        context.settings.claudeUsageDataSource = .oauth
++        runtime.settingsDidChange(context: context)
++        runtime.providerDidFail(
++            context: context, provider: .claude, error: ClaudeWebAPIFetcher.FetchError.noSessionKeyFound)
++        #expect(scheduled == [15])
++        runtime.stop(context: context)
++    }
++
++    @Test
++    func `Korean messages separate permission failures from missing login`() {
++        CodexBarLocalizationOverride.$appLanguage.withValue("ko") {
++            let permission = UsageStore.claudeWebFailureMessage(
++                ClaudeWebAPIFetcher.FetchError.cookieAccessDenied(browser: "Safari"))
++            let login = UsageStore.claudeWebFailureMessage(ClaudeWebAPIFetcher.FetchError.noSessionKeyFound)
++            #expect(permission.contains("접근 권한 필요"))
++            #expect(permission.contains("Safari"))
++            #expect(login.contains("로그인 없음"))
++            #expect(!permission.contains("로그인 없음"))
++        }
++    }
++
++    private func makeContext() throws -> (ProviderRuntimeContext, URL) {
++        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
++        let settings = SettingsStore(
++            userDefaults: InMemoryUserDefaults(),
++            configStore: CodexBarConfigStore(fileURL: root.appendingPathComponent("config.json")),
++            zaiTokenStore: NoopZaiTokenStore(),
++            syntheticTokenStore: NoopSyntheticTokenStore(),
++            codexCookieStore: InMemoryCookieHeaderStore(),
++            claudeCookieStore: InMemoryCookieHeaderStore(),
++            cursorCookieStore: InMemoryCookieHeaderStore(),
++            opencodeCookieStore: InMemoryCookieHeaderStore(),
++            factoryCookieStore: InMemoryCookieHeaderStore(),
++            minimaxCookieStore: InMemoryMiniMaxCookieStore(),
++            minimaxAPITokenStore: InMemoryMiniMaxAPITokenStore(),
++            kimiTokenStore: InMemoryKimiTokenStore(),
++            augmentCookieStore: InMemoryCookieHeaderStore(),
++            ampCookieStore: InMemoryCookieHeaderStore(),
++            copilotTokenStore: InMemoryCopilotTokenStore(),
++            tokenAccountStore: InMemoryTokenAccountStore(fileURL: root.appendingPathComponent("accounts.json")),
++            antigravityOAuthCredentialsStore: AntigravityOAuthCredentialsStore(
++                fileURL: root.appendingPathComponent("antigravity.json")),
++            keychainAccessPolicy: SettingsStoreKeychainAccessPolicy(
++                setDisabled: { _ in }, isExplicitlyDisabled: { false }),
++            performInitialProviderDetection: false)
++        settings.refreshFrequency = .manual
++        settings.statusChecksEnabled = false
++        settings.claudeUsageDataSource = .web
++        try settings.setProviderEnabled(
++            provider: .claude, metadata: #require(ProviderRegistry.shared.metadata[.claude]), enabled: true)
++        let store = UsageStore(
++            fetcher: UsageFetcher(environment: [:]),
++            browserDetection: BrowserDetection(homeDirectory: root.path),
++            settings: settings,
++            startupBehavior: .testing,
++            environmentBase: [:],
++            widgetSnapshotURL: root.appendingPathComponent("widget.json"),
++            widgetTimelineReloader: {})
++        return (ProviderRuntimeContext(provider: .claude, settings: settings, store: store), root)
++    }
++}
+--- a/Tests/CodexBarTests/ClaudeWebBackgroundRecoveryTests.swift
++++ b/Tests/CodexBarTests/ClaudeWebBackgroundRecoveryTests.swift
+@@ -1,4 +1,5 @@
+ import Foundation
++import SweetCookieKit
+ import Testing
+ @testable import CodexBarCore
+ 
+@@ -125,6 +126,38 @@
+             let cached = try #require(CookieHeaderCache.load(provider: .claude))
+             #expect(cached.cookieHeader == "sessionKey=sk-ant-imported-token")
+             #expect(cached.sourceLabel == "Safari")
++        }
++    }
++
++    @Test
++    func `cookie permission error takes precedence over stale cached authorization`() async {
++        await self.withIsolatedCookieCache {
++            CookieHeaderCache.store(
++                provider: .claude, cookieHeader: "sessionKey=sk-ant-stale-test", sourceLabel: "Safari")
++            defer { CookieHeaderCache.clear(provider: .claude) }
++            let detection = BrowserDetection(
++                homeDirectory: "/tmp/agentbar-synthetic-absent-home",
++                fileExists: { _ in false },
++                directoryContents: { _ in nil })
++            do {
++                let browserOverride: @Sendable (Browser) throws -> ClaudeWebAPIFetcher.SessionKeyInfo? = { _ in
++                    throw BrowserCookieError.accessDenied(browser: .safari, details: "test permission denial")
++                }
++                _ = try await ClaudeWebSessionKeyImport.$browserOverrideForTesting.withValue(browserOverride) {
++                    try await self.withClaudeWebStub { request in
++                        let url = try #require(request.url)
++                        return Self.jsonResponse(url: url, body: "{}", statusCode: 401, setCookie: nil)
++                    } operation: {
++                        try await ClaudeWebAPIFetcher.fetchUsage(browserDetection: detection)
++                    }
++                }
++                Issue.record("Expected permission failure")
++            } catch {
++                guard case ClaudeWebAPIFetcher.FetchError.cookieAccessDenied = error else {
++                    Issue.record("Expected permission failure instead of stale authorization: \(error)")
++                    return
++                }
++            }
+         }
+     }
+ 
+--- a/Tests/CodexBarTests/ClaudeWebRecoveryMenuTests.swift
++++ b/Tests/CodexBarTests/ClaudeWebRecoveryMenuTests.swift
+@@ -66,6 +66,7 @@
+ 
+     private func actions(
+         error: String? = nil,
++        cookieAccessFailed: Bool = false,
+         source: ClaudeUsageDataSource,
+         cookieSource: ProviderCookieSource = .auto,
+         selectedSessionKey: Bool = false,
+@@ -95,6 +96,7 @@
+             fetcher: fetcher,
+             browserDetection: BrowserDetection(cacheTTL: 0),
+             settings: settings)
++        store.claudeWebCookieAccessFailed = cookieAccessFailed
+         store.claudeSwapAccountSnapshots = Self.claudeSwapAccounts(count: claudeSwapAccountCount)
+         if let snapshot {
+             store._setSnapshotForTesting(snapshot, provider: .claude)
+@@ -306,6 +308,17 @@
+     }
+ 
+     @Test
++    func `cookie permission failure opens settings instead of requesting login`() {
++        let actions = self.actions(
++            error: UsageStore.claudeWebFailureMessage(
++                ClaudeWebAPIFetcher.FetchError.cookieAccessDenied(browser: "Safari")),
++            cookieAccessFailed: true,
++            source: .web)
++        #expect(actions.contains { $0.1 == .providerSettings(.claude) })
++        #expect(!actions.contains { $0.1 == .loginToProvider(url: "https://claude.ai/") })
++    }
++
++    @Test
+     func `Cloudflare challenge opens Claude settings instead of relogin`() {
+         let actions = self.actions(error: Self.cloudflareChallengeMessage, source: .web)
+ 
+--- /dev/null
++++ b/Tests/CodexBarTests/ClaudeWebRecoveryPolicyTests.swift
+@@ -0,0 +1,108 @@
++import Foundation
++import SweetCookieKit
++import Testing
++@testable import CodexBarCore
++
++@Suite(.serialized)
++struct ClaudeWebRecoveryPolicyTests {
++    @Test
++    func `permission errors include wrapped Cocoa and POSIX denial`() {
++        #expect(ClaudeWebRecoveryPolicy.isPermissionError(CocoaError(.fileReadNoPermission)))
++        #expect(ClaudeWebRecoveryPolicy.isPermissionError(NSError(domain: NSPOSIXErrorDomain, code: 13)))
++        #expect(ClaudeWebRecoveryPolicy.isPermissionError(NSError(domain: NSPOSIXErrorDomain, code: 1)))
++        let wrapped = NSError(domain: "test", code: 0, userInfo: [
++            NSUnderlyingErrorKey: CocoaError(.fileReadNoPermission),
++        ])
++        #expect(ClaudeWebRecoveryPolicy.isPermissionError(wrapped))
++        #expect(!ClaudeWebRecoveryPolicy.isPermissionError(CocoaError(.fileReadNoSuchFile)))
++        #expect(!ClaudeWebRecoveryPolicy.isPermissionError(URLError(.notConnectedToInternet)))
++    }
++
++    @Test
++    func `retry backs off and remains capped after prolonged failure`() {
++        let error = ClaudeWebAPIFetcher.FetchError.cookieAccessDenied(browser: "Safari")
++        #expect((0...6).map { ClaudeWebRecoveryPolicy.retryDelay(after: error, attempt: $0) } ==
++            [15, 30, 60, 120, 300, 300, 300])
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(after: error, attempt: -1) == 15)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(after: error, attempt: Int.max) == 300)
++    }
++
++    @Test
++    func `network retries exclude cancellation and slow remote throttling`() {
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(after: URLError(.timedOut), attempt: 0) == 15)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(after: URLError(.cancelled), attempt: 0) == nil)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(
++            after: ClaudeWebAPIFetcher.FetchError.serverError(statusCode: 429), attempt: 0) == 300)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(
++            after: ClaudeWebAPIFetcher.FetchError.cloudflareChallenge, attempt: 0) == 300)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(
++            after: ClaudeWebAPIFetcher.FetchError.serverError(statusCode: 503), attempt: 1) == 30)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(
++            after: ClaudeWebAPIFetcher.FetchError.serverError(statusCode: 400), attempt: 0) == nil)
++        #expect(ClaudeWebRecoveryPolicy.retryDelay(after: CancellationError(), attempt: 0) == nil)
++    }
++
++    @Test
++    func `browser denial is not reported as missing login`() {
++        let failure = BrowserCookieError.accessDenied(browser: .safari, details: "private cookie path")
++        let error = self.importError(failure)
++        guard case .cookieAccessDenied(browser: "Safari") = error else {
++            Issue.record("Expected a permission error, got \(String(describing: error))")
++            return
++        }
++        #expect(error?.localizedDescription.contains("Permission required") == true)
++        #expect(error?.localizedDescription.contains("private cookie path") == false)
++    }
++
++    @Test
++    func `missing cookie store and corrupt cookie store stay distinct`() {
++        guard case .noSessionKeyFound = self.importError(
++            BrowserCookieError.notFound(browser: .safari, details: "missing"))
++        else {
++            Issue.record("Expected a missing login")
++            return
++        }
++        guard case .cookieReadFailed(browser: "Safari") = self.importError(
++            BrowserCookieError.loadFailed(browser: .safari, details: "corrupt"))
++        else {
++            Issue.record("Expected an unreadable cookie store")
++            return
++        }
++    }
++
++    @Test
++    func `denied Safari directory is not mistaken for an absent cookie store`() {
++        let error = self.importError(
++            BrowserCookieError.notFound(browser: .safari, details: "hidden by permissions"),
++            accessIssue: .accessDenied)
++        guard case .cookieAccessDenied(browser: "Safari") = error else {
++            Issue.record("Expected a permission error for the hidden cookie directory")
++            return
++        }
++    }
++
++    private func importError(
++        _ failure: Error,
++        accessIssue: BrowserProfileAccessIssue? = nil) -> ClaudeWebAPIFetcher.FetchError?
++    {
++        let detection = BrowserDetection(
++            homeDirectory: "/tmp/agentbar-synthetic-absent-home",
++            cacheTTL: 0,
++            now: Date.init,
++            fileExists: { _ in false },
++            directoryContents: { _ in nil },
++            applicationURLs: { _ in [] },
++            profileAccessIssue: { _ in accessIssue })
++        do {
++            let browserOverride: @Sendable (Browser) throws -> ClaudeWebAPIFetcher.SessionKeyInfo? = { _ in
++                throw failure
++            }
++            _ = try ClaudeWebSessionKeyImport.$browserOverrideForTesting.withValue(browserOverride) {
++                try ClaudeWebAPIFetcher.sessionKeyInfo(browserDetection: detection)
++            }
++            return nil
++        } catch {
++            return error as? ClaudeWebAPIFetcher.FetchError
++        }
++    }
++}
+--- a/Tests/CodexBarTests/MenuBarLayoutThroughputTests.swift
++++ b/Tests/CodexBarTests/MenuBarLayoutThroughputTests.swift
+@@ -78,10 +78,17 @@
+ 
+     @Test
+     func `sparkline buckets preserve peaks and stop at the reporting frontier`() {
+-        let minutes = (0..<60).map { index in
+-            ProviderThroughputSnapshot.Minute(
++        let minutes = (0..<60).map { (index: Int) -> ProviderThroughputSnapshot.Minute in
++            let totalTokens: Int = if index == 41 {
++                151_000_000
++            } else if index == 56 {
++                49_000_000
++            } else {
++                index * 1_000_000
++            }
++            return ProviderThroughputSnapshot.Minute(
+                 start: Date(timeIntervalSince1970: Double(index * 60)),
+-                totalTokens: index == 41 ? 151_000_000 : index == 56 ? 49_000_000 : index * 1_000_000,
++                totalTokens: totalTokens,
+                 requests: 50,
+                 isPending: index >= 57)
+         }

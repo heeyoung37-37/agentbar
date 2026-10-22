@@ -30,13 +30,16 @@ STAGE="$WORK/$NAME"
 mkdir -p "$STAGE"
 APP="$STAGE/AgentBar.app"
 ditto --norsrc --noextattr "$INPUT" "$APP"
-python3 - "$APP" "$AGENTBAR_VERSION" "$UPSTREAM_COMMIT" <<'PY'
+python3 - "$APP" "$AGENTBAR_VERSION" "$UPSTREAM_COMMIT" "$ROOT/patches/agentbar.patch" <<'PY'
 import hashlib, json, plistlib, sys
 from pathlib import Path
 app = Path(sys.argv[1])
 info = app / 'Contents/Info.plist'
 data = plistlib.loads(info.read_bytes())
+upstream_version = data['CFBundleShortVersionString']
 data['CFBundleName'] = 'AgentBar'
+data['CFBundleShortVersionString'] = sys.argv[2]
+data['CFBundleVersion'] = sys.argv[2]
 data['CFBundleDisplayName'] = 'AgentBar'
 data['SUFeedURL'] = ''
 data['SUEnableAutomaticChecks'] = False
@@ -44,8 +47,9 @@ data['SUAutomaticallyUpdate'] = False
 info.write_bytes(plistlib.dumps(data, sort_keys=False))
 manifest = {
     'agentbar_version': sys.argv[2],
-    'upstream_version': data['CFBundleShortVersionString'],
+    'upstream_version': upstream_version,
     'upstream_commit': sys.argv[3],
+    'agentbar_patch_sha256': hashlib.sha256(Path(sys.argv[4]).read_bytes()).hexdigest(),
     'input_executable_sha256': hashlib.sha256((app / 'Contents/MacOS/CodexBar').read_bytes()).hexdigest(),
     'signing': 'ad-hoc', 'notarized': False,
 }
@@ -53,7 +57,7 @@ manifest = {
 PY
 cp "$ROOT/scripts/apply-preset.sh" "$STAGE/Apply AgentBar Preset.command"
 chmod +x "$STAGE/Apply AgentBar Preset.command"
-cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
+cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 python3 - "$ROOT/licenses" "$STAGE/licenses" <<'PY'
 from pathlib import Path
 import sys
